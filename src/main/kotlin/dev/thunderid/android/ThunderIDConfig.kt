@@ -33,6 +33,10 @@ data class ThunderIDConfig(
     val attestationTokenProvider: (suspend () -> String)? = null,
     // Token Validation
     val tokenValidation: TokenValidationConfig = TokenValidationConfig(),
+    // Management - collection URL overrides for the management operations.
+    val endpoints: ThunderIDEndpoints = ThunderIDEndpoints(),
+    // HTTP options.
+    val http: ThunderIDHttpConfig = ThunderIDHttpConfig(),
     // Storage & Platform
     val storage: StorageAdapter? = null,
     val instanceId: Int? = null,
