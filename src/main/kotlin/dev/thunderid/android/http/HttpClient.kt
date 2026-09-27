@@ -5,6 +5,9 @@ package dev.thunderid.android.http
 
 import dev.thunderid.android.IAMException
 import dev.thunderid.android.ThunderIDErrorCode
+import dev.thunderid.android.ThunderIDFetcher
+import dev.thunderid.android.ThunderIDHttpRequest
+import dev.thunderid.android.ThunderIDHttpResponse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -55,12 +58,65 @@ internal class HttpClient(
         body: Map<String, Any>?,
         requiresAuth: Boolean,
         headers: Map<String, String> = emptyMap(),
-    ): T =
-        withContext(Dispatchers.IO) {
-            val urlString = baseUrl + path
-            if (!urlString.startsWith("https://")) {
-                throw IAMException(ThunderIDErrorCode.INVALID_CONFIGURATION, "baseUrl must use HTTPS")
+    ): T {
+        val urlString = baseUrl + path
+        if (!urlString.startsWith("https://")) {
+            throw IAMException(ThunderIDErrorCode.INVALID_CONFIGURATION, "baseUrl must use HTTPS")
+        }
+        val jsonBody = body?.let { JSONObject(it).toString() }
+        return parseResponse(execute(method, urlString, jsonBody, requiresAuth, headers, null))
+    }
+
+    /**
+     * Sends an authenticated request to an absolute [url], which may live on a different host from
+     * `baseUrl`. When [fetcher] is set it replaces the built-in transport for this request; the access
+     * token is already attached to the request it receives.
+     */
+    suspend inline fun <reified T : Any> send(
+        method: String,
+        url: String,
+        jsonBody: String? = null,
+        fetcher: ThunderIDFetcher? = null,
+    ): T {
+        if (!url.startsWith("https://")) {
+            throw IAMException(ThunderIDErrorCode.INVALID_CONFIGURATION, "Request URL must use HTTPS")
+        }
+        return parseResponse(execute(method, url, jsonBody, true, emptyMap(), fetcher))
+    }
+
+    /**
+     * Runs the request through [fetcher], or the built-in transport, and returns the response body of a
+     * 2xx response. Any other status is mapped to an [IAMException].
+     */
+    @PublishedApi
+    internal suspend fun execute(
+        method: String,
+        url: String,
+        jsonBody: String?,
+        requiresAuth: Boolean,
+        headers: Map<String, String>,
+        fetcher: ThunderIDFetcher?,
+    ): String {
+        val requestHeaders =
+            buildMap {
+                put("Content-Type", "application/json")
+                put("Accept", "application/json")
+                putAll(headers)
+                if (requiresAuth) {
+                    val token =
+                        accessTokenProvider?.invoke()
+                            ?: throw IAMException(ThunderIDErrorCode.SDK_NOT_INITIALIZED, "No access token provider")
+                    put("Authorization", "Bearer $token")
+                }
             }
+        val request = ThunderIDHttpRequest(method, url, requestHeaders, jsonBody)
+        val response = fetcher?.fetch(request) ?: transport(request)
+        return handleResponse(response)
+    }
+
+    private suspend fun transport(request: ThunderIDHttpRequest): ThunderIDHttpResponse =
+        withContext(Dispatchers.IO) {
+            val urlString = request.url
             val connection =
                 (URL(urlString).openConnection() as HttpURLConnection).apply {
                     // The bypass is deliberately limited to loopback. Its only legitimate use is
@@ -83,19 +139,11 @@ internal class HttpClient(
                             )
                         }
                     }
-                    requestMethod = method
-                    setRequestProperty("Content-Type", "application/json")
-                    setRequestProperty("Accept", "application/json")
-                    headers.forEach { (name, value) -> setRequestProperty(name, value) }
-                    if (requiresAuth) {
-                        val token =
-                            accessTokenProvider?.invoke()
-                                ?: throw IAMException(ThunderIDErrorCode.SDK_NOT_INITIALIZED, "No access token provider")
-                        setRequestProperty("Authorization", "Bearer $token")
-                    }
-                    if (body != null) {
+                    requestMethod = request.method
+                    request.headers.forEach { (name, value) -> setRequestProperty(name, value) }
+                    if (request.body != null) {
                         doOutput = true
-                        OutputStreamWriter(outputStream).use { it.write(JSONObject(body).toString()) }
+                        OutputStreamWriter(outputStream).use { it.write(request.body) }
                     }
                 }
             val statusCode = connection.responseCode
@@ -107,37 +155,50 @@ internal class HttpClient(
                         connection.errorStream?.bufferedReader()?.readText() ?: ""
                     }
                 }.getOrDefault("")
-
-            when (statusCode) {
-                in 200..299 -> {
-                    parseResponse(responseBody)
-                }
-
-                400 -> {
-                    val msg = runCatching { JSONObject(responseBody).optString("message", "Bad request") }.getOrDefault("Bad request")
-                    throw IAMException(ThunderIDErrorCode.INVALID_INPUT, msg)
-                }
-
-                401 -> {
-                    throw IAMException(ThunderIDErrorCode.AUTHENTICATION_FAILED, "Unauthorized")
-                }
-
-                409 -> {
-                    throw IAMException(ThunderIDErrorCode.USER_ALREADY_EXISTS, "Conflict")
-                }
-
-                in 500..599 -> {
-                    throw IAMException(ThunderIDErrorCode.SERVER_ERROR, "Server error: $statusCode")
-                }
-
-                else -> {
-                    throw IAMException(ThunderIDErrorCode.UNKNOWN_ERROR, "Unexpected status: $statusCode")
-                }
-            }
+            ThunderIDHttpResponse(statusCode, responseBody)
         }
 
+    private fun handleResponse(response: ThunderIDHttpResponse): String {
+        val statusCode = response.statusCode
+        return when (statusCode) {
+            in 200..299 -> {
+                response.body
+            }
+
+            400 -> {
+                val msg = runCatching { JSONObject(response.body).optString("message", "Bad request") }.getOrDefault("Bad request")
+                throw IAMException(ThunderIDErrorCode.INVALID_INPUT, msg)
+            }
+
+            401 -> {
+                throw IAMException(ThunderIDErrorCode.AUTHENTICATION_FAILED, "Unauthorized")
+            }
+
+            403 -> {
+                throw IAMException(ThunderIDErrorCode.FORBIDDEN, "Forbidden")
+            }
+
+            404 -> {
+                throw IAMException(ThunderIDErrorCode.NOT_FOUND, "Not found")
+            }
+
+            409 -> {
+                throw IAMException(ThunderIDErrorCode.USER_ALREADY_EXISTS, "Conflict")
+            }
+
+            in 500..599 -> {
+                throw IAMException(ThunderIDErrorCode.SERVER_ERROR, "Server error: $statusCode")
+            }
+
+            else -> {
+                throw IAMException(ThunderIDErrorCode.UNKNOWN_ERROR, "Unexpected status: $statusCode")
+            }
+        }
+    }
+
+    @PublishedApi
     @Suppress("UNCHECKED_CAST")
-    private inline fun <reified T : Any> parseResponse(body: String): T {
+    internal inline fun <reified T : Any> parseResponse(body: String): T {
         if (T::class == Unit::class) return Unit as T
         return com.google.gson
             .Gson()

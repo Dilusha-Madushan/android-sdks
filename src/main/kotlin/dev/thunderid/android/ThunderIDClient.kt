@@ -6,6 +6,10 @@ package dev.thunderid.android
 import dev.thunderid.android.auth.FlowExecutionClient
 import dev.thunderid.android.auth.PKCEManager
 import dev.thunderid.android.http.HttpClient
+import dev.thunderid.android.management.AgentsClient
+import dev.thunderid.android.management.ApplicationsClient
+import dev.thunderid.android.management.ManagementTransport
+import dev.thunderid.android.management.UsersClient
 import dev.thunderid.android.token.JWKSCache
 import dev.thunderid.android.token.TokenRefresher
 import dev.thunderid.android.token.TokenStore
@@ -72,6 +76,29 @@ class ThunderIDClient {
     }
 
     fun getConfiguration(): ThunderIDConfig = config ?: throw IAMException(ThunderIDErrorCode.SDK_NOT_INITIALIZED, "SDK not initialized")
+
+    // MARK: - Management
+
+    /** Application management operations. Throws until [initialize] has run. */
+    val applications: ApplicationsClient
+        get() = ApplicationsClient(managementTransport("applications") { it.applications })
+
+    /** User management operations. Throws until [initialize] has run. */
+    val users: UsersClient
+        get() = UsersClient(managementTransport("users") { it.users })
+
+    /** Agent management operations. Throws until [initialize] has run. */
+    val agents: AgentsClient
+        get() = AgentsClient(managementTransport("agents") { it.agents })
+
+    private fun managementTransport(
+        collection: String,
+        override: (ThunderIDEndpoints) -> String?,
+    ): ManagementTransport {
+        val cfg = config ?: throw IAMException(ThunderIDErrorCode.SDK_NOT_INITIALIZED, "Call initialize() before using the SDK")
+        val http = httpClient ?: throw IAMException(ThunderIDErrorCode.SDK_NOT_INITIALIZED, "Call initialize() before using the SDK")
+        return ManagementTransport(http, override(cfg.endpoints) ?: "${cfg.baseUrl}/$collection", cfg.http.fetcher)
+    }
 
     // MARK: - Authentication
 

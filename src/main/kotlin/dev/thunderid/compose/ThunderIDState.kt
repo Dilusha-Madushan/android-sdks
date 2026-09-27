@@ -13,6 +13,7 @@ import dev.thunderid.android.ThunderIDConfig
 import dev.thunderid.android.User
 import dev.thunderid.android.UserProfile
 import dev.thunderid.compose.i18n.ThunderIDI18n
+import dev.thunderid.compose.management.ResourceInvalidator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -54,6 +55,9 @@ class ThunderIDState(
     private val schemaMutex = Mutex()
 
     val isSignedIn: Boolean get() = user != null
+
+    /** Coordinates refetching between the management queries and mutations under this state. */
+    val invalidator = ResourceInvalidator()
 
     internal suspend fun initialize(config: ThunderIDConfig) {
         isLoading = true
